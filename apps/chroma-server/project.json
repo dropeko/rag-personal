@@ -1,0 +1,30 @@
+{
+    "name": "chroma-server",
+    "projectType": "application",
+    "sourceRoot": "apps/chroma-server",
+    "tags": [
+        "python",
+        "chromadb"
+    ],
+    "targets": {
+        "install": {
+            "executor": "nx:run-commands",
+            "options": {
+                "commands": [
+                    "python -m venv venv",
+                    "cmd /c \"venv\\Scripts\\pip install -r requirements.txt\""
+                ],
+                "parallel": false,
+                "cwd": "apps/chroma-server"
+            }
+        },
+        "serve": {
+            "continuous": true,
+            "executor": "nx:run-commands",
+            "options": {
+                "command": "cmd /c \"venv\\Scripts\\python server.py\"",
+                "cwd": "apps/chroma-server"
+            }
+        }
+    }
+}

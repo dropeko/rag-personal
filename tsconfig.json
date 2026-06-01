@@ -1,0 +1,34 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compileOnSave": false,
+  "files": [],
+  "references": [
+    {
+      "path": "./apps/db-backend-e2e"
+    },
+    {
+      "path": "./apps/db-backend"
+    },
+    {
+      "path": "./apps/wo-backend-e2e"
+    },
+    {
+      "path": "./apps/wo-backend"
+    },
+    {
+      "path": "./apps/wo-frontend"
+    },
+    {
+      "path": "./apps/db-frontend"
+    },
+    {
+      "path": "./libs/db-lib"
+    },
+    {
+      "path": "./libs/ui-lib"
+    },
+    {
+      "path": "./libs/db-frontend-lib"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+    "name": "@data-platforms/db-backend-e2e",
+    "version": "0.0.1",
+    "private": true,
+    "nx": {
+        "name": "db-backend-e2e",
+        "implicitDependencies": [
+            "db-backend"
+        ],
+        "targets": {
+            "e2e": {
+                "executor": "@nx/jest:jest",
+                "outputs": [
+                    "{projectRoot}/test-output/jest/coverage"
+                ],
+                "options": {
+                    "jestConfig": "apps/db-backend-e2e/jest.config.cts",
+                    "passWithNoTests": true
+                },
+                "dependsOn": [
+                    "db-backend:build",
+                    "db-backend:serve"
+                ]
+            }
+        }
+    }
+}

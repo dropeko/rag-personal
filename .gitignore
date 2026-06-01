@@ -1,0 +1,10 @@
+node_modules/
+test-output
+dist/
+.nx/
+.env
+**/.env
+chroma_db_finetune/
+apps/chroma-server/venv/
+reports.db
+dev.db

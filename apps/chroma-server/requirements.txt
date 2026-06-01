@@ -1,0 +1,5 @@
+chromadb
+python-dotenv
+uvicorn
+fastapi
+opentelemetry-instrumentation-fastapi

@@ -1,0 +1,84 @@
+/* ISQ Base Styles — import this in your app's main CSS */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Lora:ital,wght@0,400;0,500;0,600;1,400&display=swap');
+
+@layer base {
+    * {
+        border-color: #e0e0e0;
+        box-sizing: border-box;
+    }
+
+    body {
+        background-color: #f8f8f8;
+        color: #1a1a1a;
+        font-family: 'Inter', system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+}
+
+@layer utilities {
+    .glass-card {
+        background-color: #ffffff;
+        border: 1px solid #e8e8e8;
+        border-radius: 1rem;
+        box-shadow: 0 1px 4px rgb(0 0 0 / 0.06), 0 4px 16px rgb(0 0 0 / 0.04);
+    }
+
+    .glass-card-hover:hover {
+        background-color: #ffffff;
+        border-color: rgb(214 0 0 / 0.2);
+        box-shadow: 0 4px 20px rgb(214 0 0 / 0.08), 0 1px 4px rgb(0 0 0 / 0.06);
+        transition: all 0.3s;
+    }
+
+    /* Gradiente hero ISQ: vermelho suave → cinza claro */
+    .gradient-hero {
+        background: linear-gradient(160deg,
+                #fff5f5 0%,
+                #ffe0e0 25%,
+                #fff0f0 60%,
+                #f8f8f8 100%);
+    }
+
+    /* Texto gradiente vermelho ISQ */
+    .gradient-text {
+        background-clip: text;
+        -webkit-background-clip: text;
+        color: transparent;
+        background-image: linear-gradient(135deg, #d60000, #ff4444);
+    }
+
+    .glow-ring {
+        box-shadow:
+            0 0 0 1px #e0e0e0,
+            0 2px 8px rgb(0 0 0 / 0.08);
+    }
+
+    .glow-ring-focus:focus {
+        box-shadow:
+            0 0 0 2px rgb(214 0 0 / 0.3),
+            0 4px 16px rgb(214 0 0 / 0.15);
+    }
+
+    .font-serif {
+        font-family: 'Lora', Georgia, serif;
+    }
+
+    .animate-pulse-glow {
+        animation: pulse-glow 3s ease-in-out infinite;
+    }
+
+    .animate-float {
+        animation: float 4s ease-in-out infinite;
+    }
+
+    @keyframes pulse-glow {
+        0%, 100% { opacity: 0.4; }
+        50% { opacity: 0.8; }
+    }
+
+    @keyframes float {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-6px); }
+    }
+}
