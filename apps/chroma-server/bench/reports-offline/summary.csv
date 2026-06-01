@@ -1,0 +1,2 @@
+variant,n_queries,recall@5,recall@10,mrr,ndcg@10
+v_tfidf_baseline,234,0.6709,0.7308,0.6044,0.8852

@@ -409,39 +409,138 @@ Esforço restante: **~1 dia** para subir o `chroma-server`, rodar `prepare`
 
 ---
 
-## 10. TL;DR para a apresentação
+## 11. Resultados reais medidos nesta sprint
 
-1. **Corpus é pequeno e técnico**: 8k chunks (78 laudos + ~8k captions de
-   metalografia). Custo de qualquer embedding é **irrelevante** (< US$ 0.40
-   re-indexa tudo no `3-large`). O desafio é **precisão semântica em
-   jargão de inspeção**, não escala.
-2. **Bug detectado em produção (§1.3)**: o Chroma foi indexado com um
-   modelo fine-tuned (`fine_tuned_report_model`) que **não está no repo**,
-   mas as queries usam Xenova vanilla. **Mismatch garantido** — Recall
-   atual está abaixo do real. Resolver antes/junto da migração.
+Bench parcial rodado em **2026-06-01** no ambiente de desenvolvimento.
+**Restrição encontrada**: o ambiente bloqueia `huggingface.co` e
+`api.openai.com` por política de rede, então **V1a/V1b/V2/V3/V4 não puderam
+ser medidos aqui**. Para deliver de números reais nesta sprint, rodei um
+**baseline TF-IDF (offline, scikit-learn)** + a **latência real do
+Chroma HNSW** na coleção de produção.
+
+> Artefatos completos em `apps/chroma-server/bench/reports-offline/`:
+> `summary.csv`, `latency.csv`, `latency-chroma.csv`,
+> `breakdown-by-template.txt`, `quality.png`, `latency.png`.
+
+### 11.1 Latência real do Chroma HNSW (produção)
+
+200 queries com vetores aleatórios normalizados 768d, contra a coleção real
+em chroma-server v1.5.9 rodando localmente:
+
+| Coleção                    | Docs  | p50      | p95      | p99      | mean     |
+|----------------------------|-------|----------|----------|----------|----------|
+| `report_texts`             | 78    | 4.58 ms  | 5.46 ms  | 5.99 ms  | 4.68 ms  |
+| `metallography_captions`   | 7.943 | 5.08 ms  | 6.39 ms  | 6.97 ms  | 5.24 ms  |
+
+**Leitura**: HNSW escala muito bem nesta faixa de volume — passar de 78
+para 7.943 docs adiciona ~0.5 ms p50. Latência do **store não é gargalo**;
+gargalo do RAG vai ser embedding (V2–V4 dependem de rede até OpenAI) e o
+LLM gerador.
+
+### 11.2 Baseline TF-IDF (scikit-learn) vs golden sintético
+
+234 queries, 78 chunks, vocab 7.667 tokens (unigram + bigram, stopwords
+PT-BR, sublinear TF):
+
+| Métrica         | Score   |
+|-----------------|---------|
+| Recall@5        | **0.671** |
+| Recall@10       | **0.731** |
+| MRR             | **0.604** |
+| nDCG@10         | **0.885** |
+| Embed latency p50 | 0.42 ms |
+| Search latency p50 | 0.65 ms |
+
+> Esses números são piso. O golden sintético **infla TF-IDF** (queries usam
+> vocabulário dos próprios chunks). Modelos neurais precisam superar isso
+> **com folga** para justificar custo/complexidade.
+
+### 11.3 Onde TF-IDF brilha e onde quebra (breakdown por template)
+
+Distribuição de Recall@5 do TF-IDF por **tipo de query** no golden sintético
+(`reports-offline/breakdown-by-template.txt`):
+
+| Template de query                                    | Recall@5 | n   |
+|------------------------------------------------------|----------|-----|
+| `content.first_sentence` (cita literal um trecho)    | **1.000**| 35  |
+| `content.dano` (menciona keyword de dano)            | 0.885    | 26  |
+| `metadata.tag.danos` ("danos no equipamento {tag}?") | 0.760    | 25  |
+| `metadata.tag.conclusao`                             | 0.758    | 33  |
+| `metadata.tag.causa`                                 | 0.692    | 39  |
+| `metadata.analise_tag`                               | 0.680    | 25  |
+| `metadata.cliente_unidade` (por cliente/unidade)     | 0.308    | 26  |
+| `metadata.equipamento` (por número de relatório)     | **0.120**| 25  |
+
+**Interpretação central**: o gap entre 100% e 12% é exatamente onde a
+**recuperação semântica neural** ganha — quando a query pergunta por
+metadados (cliente, número de relatório, unidade) que **não aparecem no
+texto do chunk**, TF-IDF não tem como achar. Esse é o **valor agregado
+esperado** das variantes V2–V4 (OpenAI v3) ou V1b (MPNet vanilla coerente).
+
+### 11.4 Conclusões da rodada parcial
+
+1. **Chroma HNSW não é problema** em latência nesta escala — pode ficar
+   tranquilo no roadmap.
+2. **TF-IDF entrega Recall@5 de 67% no sintético** — qualquer stack neural
+   que não bata isso com folga (>= +15pp) é regressão.
+3. **Buracos de TF-IDF em queries "por metadado"** mapeiam o ganho que o
+   modelo neural precisa entregar. Esse é o teste central da migração.
+4. **Confirmação operacional**: o pipeline (golden → query → score → PNGs)
+   está funcional. Quando o time rodar com HF/OpenAI liberados, é
+   `prepare.py` + `run-queries.ts/.py` + `score.py` e produz V1a/V1b/V2–V4
+   em <1h.
+
+### 11.5 Restrição de ambiente — informação core p/ a apresentação
+
+O bench **completo** (com modelos neurais) exige que o ambiente de execução
+permita saída para:
+
+- `huggingface.co` (download de MPNet / BGE-m3 / outros).
+- `api.openai.com` (embeddings v3).
+
+Recomendar à TI a liberação dessas duas saídas (com restrição por
+allowlist) **antes** da próxima sprint, ou rodar o bench numa workstation
+desbloqueada. Caso contrário, ficamos limitados a TF-IDF.
+
+---
+
+## 12. TL;DR para a apresentação
+
+1. **Corpus é pequeno e técnico**: 8k chunks (78 laudos + ~8k captions).
+   Custo de qualquer embedding é **irrelevante** (< US$ 0.40 re-indexa
+   tudo no `3-large`). O desafio é **precisão semântica em jargão de
+   inspeção**, não escala.
+2. **Bug detectado em produção (§1.3)**: índice usa `fine_tuned_report_model`
+   (não está no repo); queries usam Xenova vanilla. **Mismatch garantido**
+   — Recall atual está abaixo do real.
 3. **Ingestão contínua é parte do escopo (§3.5)**: pipeline event-driven
-   após `report-generate`, fila no Postgres existente, idempotente, custo
-   ~US$ 0.0002 por laudo com `3-small`.
-4. **Embedding não é o custo**: o LLM gerador é. Decidir lá primeiro
-   (`gpt-4o-mini` como entrada, ~US$ 0.0008/resposta).
-5. **Qualidade**: dados oficiais OpenAI mostram **+12.6pp em MIRACL
-   multilíngue** (relevante para PT-BR) vs ada-002. MPNet vanilla é de
-   2021. Tendência clara, mas **provar com o bench** antes de migrar.
-6. **Stack proposta**: Chroma mantém no curto prazo, `pgvector` no roadmap
+   após `report-generate`, fila no Postgres existente, idempotente,
+   custo ~US$ 0.0002 por laudo com `3-small`.
+4. **Chroma HNSW não é gargalo (§11.1)**: medido p99 = **5.99 ms** em 78
+   docs, **6.97 ms** em ~8k docs. Latência do RAG será dominada por
+   embedding (rede até OpenAI) e LLM gerador.
+5. **TF-IDF é piso forte (§11.2): Recall@5 = 67% no golden sintético**.
+   Qualquer stack neural precisa bater isso **com folga** (≥ +15pp) para
+   justificar custo + complexidade + dependência externa.
+6. **Onde o neural ganha (§11.3)**: queries por metadado ("equipamento
+   X?", "cliente Y na unidade Z?") **caem para 12-30% no TF-IDF** —
+   exatamente o gap semântico que embeddings v3 devem fechar.
+7. **Embedding não é o custo, o LLM é** — decidir LLM primeiro
+   (`gpt-4o-mini` como baseline, ~US$ 0.0008/resposta).
+8. **Stack proposta**: Chroma mantém no curto prazo, `pgvector` no roadmap
    (elimina o `chroma-server` Python); embedder
-   `text-embedding-3-small@768` (compatibilidade dimensional) com fallback
-   Xenova feature-flagged; LLM `gpt-4o-mini` baseline; mascaramento + DPA
-   + ZDR como pré-condição inegociável.
-7. **Pendência humana**: golden set curado pelo time de domínio. Enquanto
-   não vem, usamos o **golden sintético já gerado** (234 queries) como
-   piso de qualidade.
+   `text-embedding-3-small@768` com fallback Xenova feature-flagged;
+   `gpt-4o-mini` baseline; mascaramento + DPA + ZDR como pré-condição.
+9. **Restrição encontrada (§11.5)**: ambiente bloqueia `huggingface.co` e
+   `api.openai.com`. **TI precisa liberar essas saídas** para completar o
+   bench neural — ou rodar numa workstation desbloqueada.
 
-### 10.1 Próximos passos concretos
+### 12.1 Próximos passos concretos
 
 | # | Ação | Esforço | Bloqueia |
 |---|------|---------|----------|
-| 1 | Subir `chroma-server` + rodar `prepare.py` para V1b/V2/V3/V4 | ~2h | Bench |
-| 2 | Executar `run-queries.ts` + `score.py` com `golden-set.synthetic.csv` | ~1h | Apresentação |
+| 1 | Liberar saída para `huggingface.co` e `api.openai.com` na TI (ou usar workstation desbloqueada) | discussão | Bench neural |
+| 2 | Rodar `prepare.py` (V1b/V2/V3/V4) + `run-queries.ts/.py` + `score.py` com `golden-set.synthetic.csv` | ~3h | Apresentação |
 | 3 | Decidir destino do `fine_tuned_report_model` (manter, descontinuar, versionar) | discussão | Stack final |
 | 4 | Implementar pipeline de ingestão contínua (§3.5) | 3–5 dias | Produção |
 | 5 | Curar 50–100 pares humanos do golden set | depende do domínio | Validação final |

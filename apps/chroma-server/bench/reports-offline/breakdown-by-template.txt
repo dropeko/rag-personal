@@ -1,0 +1,12 @@
+Breakdown TF-IDF Recall por template (synthetic golden set, 234 queries)
+
+                          recall@5  count  recall@10
+template                                            
+content.first_sentence       1.000     35      1.000
+content.dano                 0.885     26      0.923
+metadata.tag.danos           0.760     25      0.760
+metadata.tag.conclusao       0.758     33      0.818
+metadata.tag.causa           0.692     39      0.795
+metadata.analise_tag         0.680     25      0.680
+metadata.cliente_unidade     0.308     26      0.385
+metadata.equipamento         0.120     25      0.320

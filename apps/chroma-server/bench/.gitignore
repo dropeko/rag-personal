@@ -6,3 +6,9 @@ golden-set.csv
 results.csv
 results-*.csv
 reports/
+# Mantém artefatos resumo do bench rodado em 2026-06-01:
+!reports-offline/summary.csv
+!reports-offline/latency.csv
+!reports-offline/latency-chroma.csv
+!reports-offline/breakdown-by-template.txt
+!reports-offline/*.png
