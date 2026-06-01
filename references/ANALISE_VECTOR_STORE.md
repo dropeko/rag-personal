@@ -62,18 +62,24 @@ Premissas:
 - Corpus médio: tomamos **100k chunks** como ponto central.
 - Tamanho médio do chunk: **~400 tokens** (típico p/ laudos técnicos).
 - Reindexação completa **2× ao ano** (mudança de modelo, ajuste de chunking).
+- Cap de **8191 tokens por request** na API de embeddings v3 — bem acima do
+  nosso tamanho de chunk, então é não-restritivo. Importa apenas para garantir
+  que nenhum chunk extrapola.
 
-| Modelo                              | US$ / 1M tokens | 100k chunks (40M tokens) | 500k chunks (200M tok) |
-|-------------------------------------|-----------------|--------------------------|------------------------|
-| Xenova MPNet (local, CPU)           | $0 (compute)    | ~6–10 h CPU              | ~30–50 h CPU           |
-| `text-embedding-3-small`            | **$0.020**      | **$0.80**                | **$4.00**              |
-| `text-embedding-3-small` (dim=512)  | $0.020 (mesmo)  | $0.80                    | $4.00                  |
-| `text-embedding-3-large`            | **$0.130**      | **$5.20**                | **$26.00**             |
-| `text-embedding-ada-002` (legado)   | $0.100          | $4.00                    | $20.00                 |
+| Modelo                              | US$ / 1M tok (Standard) | US$ / 1M tok (Batch −50%) | 100k chunks (40M tokens) | 500k chunks (200M tok) |
+|-------------------------------------|-------------------------|---------------------------|--------------------------|------------------------|
+| Xenova MPNet (local, CPU)           | $0 (compute)            | n/a                       | ~6–10 h CPU              | ~30–50 h CPU           |
+| `text-embedding-3-small`            | **$0.020**              | **$0.010**                | **$0.80** (Batch: $0.40) | **$4.00** (Batch: $2.00) |
+| `text-embedding-3-large`            | **$0.130**              | **$0.065**                | **$5.20** (Batch: $2.60) | **$26.00** (Batch: $13.00) |
+| `text-embedding-ada-002` (legado)   | $0.100                  | $0.050                    | $4.00                    | $20.00                 |
 
 > **Conclusão de custo de indexação**: irrelevante. Mesmo no pior cenário
-> (re-embedding completo de 500k chunks com `large`), custa **menos de US$ 30**.
-> Custo **não deve ser o critério de decisão** dessa camada.
+> (re-embedding completo de 500k chunks com `large`, sem Batch), custa
+> **US$ 26**. Com Batch API, **US$ 13**. Custo **não deve ser o critério de
+> decisão** dessa camada.
+
+> Re-indexação é caso típico de uso do Batch API (não precisa ser síncrona):
+> sempre rodar via Batch para indexação em massa.
 
 ### 3.2 Embeddings — custo de query
 
@@ -164,9 +170,17 @@ o mais invasivo):
 2. **Trocar embedding para `text-embedding-3-small` com `dimensions=768`**:
    - Mantém compatibilidade dimensional com a coleção atual (768) → permite
      **A/B test sem refazer schema**.
-   - Custo de re-indexação ≈ US$ 0.80 por full rebuild de 100k chunks.
-   - Ganho de qualidade esperado: +5 a +12% nDCG@10 vs MPNet (estimativa a
-     confirmar no bench da §7).
+   - Custo de re-indexação: ~$0.80 (Standard) ou **~$0.40 (Batch API)** por
+     full rebuild de 100k chunks. Recomendado rodar via Batch.
+   - Ganho de qualidade esperado vs MPNet (dados oficiais OpenAI, números a
+     **confirmar no bench da §7** com nosso corpus real):
+     - MTEB médio: **+1.3pp** vs ada-002 (62.3% vs 61.0%) — ganho modesto em
+       inglês.
+     - **MIRACL** (retrieval multilíngue, inclui PT-BR): **+12.6pp** vs ada-002
+       (44.0% vs 31.4%) — **ganho substancial** e é a métrica relevante para
+       nosso caso de uso.
+     - Não há benchmark público direto MPNet vs `3-small` em PT-BR — daí a
+       necessidade do bench §7.
 3. **Manter Xenova/MPNet como fallback offline** (feature-flag no
    `ChromaService` para alternar `embeddingFunction`). Útil para:
    - Ambientes onde o cliente exige on-prem.
@@ -186,12 +200,15 @@ o mais invasivo):
 
 Trocar para OpenAI **somente se** o bench da §7 confirmar:
 
-- nDCG@10 ≥ **+5%** vs MPNet no conjunto de queries reais; **e**
-- p95 de latência fim-a-fim ≤ **400 ms** (sem o LLM); **e**
-- O ticket jurídico de mascaramento + DPA estiver aprovado.
+- **Recall@5 ≥ +5pp** vs MPNet no golden set real (métrica primária, mais
+  estável que nDCG para top-k pequeno); **e**
+- **MRR ≥ +0.05** vs MPNet; **e**
+- p95 de latência fim-a-fim de embedding+search ≤ **400 ms**; **e**
+- Ticket jurídico de mascaramento + DPA aprovado.
 
-Se algum dos três falhar → manter Opção A e revisitar com BGE-m3 / e5-multilingual
-local (modelos open-source mais novos, gratuitos, geralmente superam MPNet).
+Se algum falhar → manter Opção A e revisitar com **BGE-m3** ou
+**multilingual-e5-large** local (modelos open-source mais novos, gratuitos,
+geralmente superam MPNet em PT-BR sem custo recorrente nem saída de dados).
 
 ---
 
@@ -253,7 +270,30 @@ com o domínio. Sem o golden set, qualquer comparação vira opinião.
 
 ---
 
-## 9. TL;DR para a apresentação
+## 9. Fontes / dados externos confirmados
+
+Verificado em 2026-06-01:
+
+- **Pricing OpenAI** (Standard / Batch −50%): `3-small` $0.020/$0.010,
+  `3-large` $0.130/$0.065 por 1M tokens; `gpt-4o-mini` $0.15 in / $0.60 out;
+  `gpt-4.1-mini` $0.40 in / $1.60 out; `gpt-4o` $2.50/$10; `gpt-4.1` $2/$8.
+- **Cap de input** dos embeddings v3: 8191 tokens/request.
+- **Performance OpenAI v3 (oficial)**: MTEB médio passou de 61.0% (ada-002)
+  para 62.3% (`3-small`); MIRACL multilíngue 31.4% → 44.0%; redução de
+  dimensão via parâmetro `dimensions` (Matryoshka representation learning)
+  com perda mínima de qualidade.
+- **Dim padrão**: `3-small` 1536 (truncável até 256), `3-large` 3072
+  (truncável). `paraphrase-multilingual-mpnet-base-v2`: 768 dim, fixa.
+
+Itens a confirmar **com o bench (§7)**, não no documento:
+
+- Recall/MRR/nDCG concretos por variante no nosso corpus.
+- Latência real do `chroma-server` atual sob carga.
+- Distribuição de tokens por chunk (para validar premissa de 400 tok).
+
+---
+
+## 10. TL;DR para a apresentação
 
 1. **Embedding não é o custo**: indexar 100k chunks na OpenAI custa < US$ 1.
    O LLM gerador é o item caro — decidir lá primeiro.

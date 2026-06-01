@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+golden-set.csv
+results.csv
+results-*.csv
+reports/

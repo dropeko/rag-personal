@@ -1,0 +1,6 @@
+question,expected_report_id,notes
+"Qual a vibração medida no equipamento P-101 durante o ensaio?",1234,"Pergunta direta — exemplo, substituir"
+"Houve trincas observadas na inspeção do tanque T-05?",5678,"Pergunta sim/não — exemplo"
+"Quais foram as recomendações finais para a turbina TG-02?",9012,"Pergunta sobre conclusão — exemplo"
+"O ensaio de ultrassom no vaso V-300 indicou perda de espessura?",3456,"Exemplo de pergunta técnica específica"
+"Liste os ensaios não destrutivos aplicados no relatório de inspeção da bomba B-21",7890,"Exemplo de pergunta agregadora"
