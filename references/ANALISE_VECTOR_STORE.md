@@ -1,31 +1,80 @@
 # Análise Técnica — ChromaDB local (Xenova/MPNet) vs OpenAI Embeddings + API
 
-> Sprint: comparativo de stack de RAG para `wo-backend` / `db-backend`.
-> Escopo: **RAG ponta-a-ponta** (embeddings + vector store + LLM gerador).
-> Restrições: corpus médio (10k–500k chunks); dados de cliente/laudo — saída para
-> APIs externas permitida **com mitigação** (DPA, zero-retention, mascaramento).
+> Sprint: comparativo de stack de RAG para gerar **relatórios técnicos de
+> inspeção industrial** (Análise de Falhas — equipamentos PETROBRÁS).
+> Escopo: **RAG ponta-a-ponta** (embeddings + vector store + LLM gerador) +
+> **pipeline de ingestão contínua** (banco alimentado conforme novos relatórios
+> são gerados).
+> Restrições: dados de cliente/laudo — saída para APIs externas permitida
+> **com mitigação** (DPA, zero-retention, mascaramento).
 
 ---
 
 ## 1. Contexto atual ("abordagem ml_wo")
 
+### 1.1 Stack
+
 | Camada            | Implementação                                                                                                | Onde está                                                    |
 |-------------------|--------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------|
-| Embedding         | `Xenova/paraphrase-multilingual-mpnet-base-v2` (MPNet multilingual, **768 dim**), ONNX em Node               | `apps/db-backend/.../chroma.service.ts:97`                   |
-| Vector store      | ChromaDB v1.x persistente (sqlite + HNSW), via FastAPI/uvicorn                                               | `apps/chroma-server/server.py`, `chroma_db_finetune/` (~44 MB) |
-| Coleção           | `report_texts` (chunks de relatório com `id_relatorio`, `caminho`)                                           | `chroma.service.ts:13`                                       |
+| Embedding (query) | `Xenova/paraphrase-multilingual-mpnet-base-v2` (MPNet multilingual **vanilla**, 768 dim), ONNX em Node       | `apps/db-backend/.../chroma.service.ts:97`                   |
+| Embedding (index) | **`models/fine_tuned_report_model`** (sentence-transformer fine-tunado pelo time, 768 dim) — asset externo, **não está no repo** | metadado da coleção em `chroma.sqlite3`                      |
+| Vector store      | ChromaDB v1.x persistente (sqlite + HNSW), via FastAPI/uvicorn                                               | `apps/chroma-server/server.py`, `chroma_db_finetune/` (~20 MB sqlite) |
 | Cliente           | `chromadb` (JS) no NestJS                                                                                    | `db-backend`                                                 |
 | LLM gerador       | **Não definido ainda** (template DOCX é preenchido por dados estruturados, geração textual ainda em aberto) | —                                                            |
 
-Pontos relevantes para a decisão:
+### 1.2 Volume real do corpus (inspeção direta no `chroma.sqlite3`)
 
-- Embedding **roda no processo Node**: bom para custo zero por token, ruim para
-  cold-start e para throughput em batch (CPU, single-thread por chamada).
-- O Chroma local depende de o servidor uvicorn estar de pé na mesma máquina —
-  acoplamento operacional não trivial em produção.
-- Modelo MPNet multilingual tem performance razoável em PT-BR, mas é de 2021;
-  modelos mais novos (BGE-m3, e5-multilingual, OpenAI v3) superam em benchmarks
-  recentes (MTEB pt-br/multi).
+| Coleção                    | Chunks | Conteúdo                                       | Por relatório   |
+|----------------------------|--------|------------------------------------------------|-----------------|
+| `report_texts`             | **78** | seção "DISCUSSÃO DOS RESULTADOS" dos laudos    | 1 chunk/laudo   |
+| `metallography_captions`   | 7.943  | captions de imagens de metalografia (textuais) | ~100 caps/laudo |
+| **Total**                  | 8.021  | — | — |
+
+- **78 relatórios distintos** (campo `id_relatorio`), todos do tipo **AF**
+  (Análise de Falha). Cliente predominante: PETROBRÁS COMPARTILHADO.
+- Tipos de equipamento: Caldeira, Permutador de Calor, Vaso Separador,
+  Válvula de Segurança, Cilindro, Eixo de Bomba, Trecho de Tubo, etc.
+- **Tamanho médio do chunk** em `report_texts`: ~1.600 caracteres ≈ **~400
+  tokens** (chunk = seção inteira de discussão, denso e técnico).
+- Corpus inicial é **pequeno em volume mas técnico em densidade** — o
+  desafio do RAG aqui é **precisão semântica em jargão de engenharia de
+  inspeção**, não escala.
+
+### 1.3 Caveat crítico — mismatch entre indexação e query
+
+O Chroma foi indexado por **`models/fine_tuned_report_model`** (registrado
+nos metadados da coleção). Já a aplicação Node consulta usando
+**`Xenova/paraphrase-multilingual-mpnet-base-v2` vanilla**. Os dois modelos
+**não produzem o mesmo espaço vetorial** — a busca atual está rodando com
+embeddings de query desalinhados dos de indexação, o que **degrada Recall**
+de forma imprevisível.
+
+**Implicações para a sprint**:
+
+- A comparação justa exige **resolver primeiro o mismatch** (ou
+  reindexar com o modelo de query, ou indexar e consultar com o mesmo
+  modelo de cada variante).
+- O fine-tuning é um **ativo do projeto ml_wo** que pode justificar manter
+  embeddings locais — mas o asset (`models/fine_tuned_report_model`) **não
+  está no repo**, então hoje a stack está degradada por configuração
+  perdida.
+- Decisão de stack precisa contemplar **se vamos manter pipeline de
+  fine-tuning** (custo: GPU + curadoria de pares) ou **descontinuar** em
+  favor de um embedder genérico forte (OpenAI v3 ou BGE-m3).
+
+### 1.4 Requisito de ingestão contínua
+
+O `chroma_db_finetune` é o **banco inicial**. Em produção, novos
+relatórios técnicos serão gerados continuamente (consultoria / inspeção em
+campo) e **precisam ser indexados automaticamente**. A solução de
+ingestão online ainda **não existe** e faz parte do escopo. Implicações:
+
+- O embedder precisa ser **estável** entre versões (senão cada upgrade
+  exige reindex completo do histórico).
+- **Batch API (50% off) não serve** para ingestão online — é async até
+  24h. Serve apenas para reindex em massa eventual.
+- Trigger natural: hook após o `report-generate` salvar o DOCX → fila
+  → embed → upsert no Chroma. Detalhes em §3.5.
 
 ---
 
@@ -57,29 +106,26 @@ Pontos relevantes para a decisão:
 
 ### 3.1 Embeddings — custo de indexação
 
-Premissas:
+Premissas (verificadas no corpus real, §1.2):
 
-- Corpus médio: tomamos **100k chunks** como ponto central.
-- Tamanho médio do chunk: **~400 tokens** (típico p/ laudos técnicos).
-- Reindexação completa **2× ao ano** (mudança de modelo, ajuste de chunking).
-- Cap de **8191 tokens por request** na API de embeddings v3 — bem acima do
-  nosso tamanho de chunk, então é não-restritivo. Importa apenas para garantir
-  que nenhum chunk extrapola.
+- **Hoje**: 8.021 chunks (78 + 7.943). Chunk médio em `report_texts` ≈ 400 tok.
+- **Projeção 12 meses** (estimativa — depende da taxa de inflow de novos
+  laudos): assumindo 5 laudos/semana × 50 sem × (1 chunk texto + ~100 captions)
+  ≈ +25k chunks/ano → corpus de ~33k em 1 ano. Continua "pequeno".
+- Cap de **8.191 tokens por request** na API de embeddings v3 — não-restritivo.
 
-| Modelo                              | US$ / 1M tok (Standard) | US$ / 1M tok (Batch −50%) | 100k chunks (40M tokens) | 500k chunks (200M tok) |
-|-------------------------------------|-------------------------|---------------------------|--------------------------|------------------------|
-| Xenova MPNet (local, CPU)           | $0 (compute)            | n/a                       | ~6–10 h CPU              | ~30–50 h CPU           |
-| `text-embedding-3-small`            | **$0.020**              | **$0.010**                | **$0.80** (Batch: $0.40) | **$4.00** (Batch: $2.00) |
-| `text-embedding-3-large`            | **$0.130**              | **$0.065**                | **$5.20** (Batch: $2.60) | **$26.00** (Batch: $13.00) |
-| `text-embedding-ada-002` (legado)   | $0.100                  | $0.050                    | $4.00                    | $20.00                 |
+| Modelo                              | US$ / 1M tok (Std) | US$ / 1M tok (Batch −50%) | **Corpus atual (~3M tok)** | Projeção 1 ano (~13M tok) |
+|-------------------------------------|--------------------|---------------------------|----------------------------|---------------------------|
+| Xenova MPNet (local, CPU)           | $0                 | n/a                       | ~30 min CPU                | ~2 h CPU                  |
+| `text-embedding-3-small`            | $0.020             | $0.010                    | **$0.06** (Batch: $0.03)   | **$0.26** (Batch: $0.13)  |
+| `text-embedding-3-large`            | $0.130             | $0.065                    | $0.39 (Batch: $0.20)       | $1.69 (Batch: $0.85)      |
 
-> **Conclusão de custo de indexação**: irrelevante. Mesmo no pior cenário
-> (re-embedding completo de 500k chunks com `large`, sem Batch), custa
-> **US$ 26**. Com Batch API, **US$ 13**. Custo **não deve ser o critério de
-> decisão** dessa camada.
+> **Conclusão de custo de indexação**: **completamente irrelevante** na
+> escala atual e projetada. Re-embedar todo o corpus via `3-large` custa
+> **menos de US$ 0.40**. Custo **não é critério de decisão** nesta camada.
 
-> Re-indexação é caso típico de uso do Batch API (não precisa ser síncrona):
-> sempre rodar via Batch para indexação em massa.
+> Re-indexação histórica (mudança de embedder, ajuste de chunking): rodar
+> via Batch API. Ingestão online (novo laudo): Standard API (síncrono).
 
 ### 3.2 Embeddings — custo de query
 
@@ -114,8 +160,44 @@ Premissa por resposta RAG: ~3k tokens de contexto + ~500 tokens de saída.
 |-------------------------------|------------------------------------------------|-----------------------------|
 | Servidor Python adicional     | **sim** (`apps/chroma-server`)                 | sim (idem)                  |
 | RAM extra para modelo ONNX    | ~1.2 GB residente no Node                      | 0                           |
-| Disco (100k chunks)           | 768 dim × 4 B = ~300 MB                        | 1536 dim → ~600 MB          |
-| Disco (500k chunks)           | ~1.5 GB                                        | ~3 GB (ou 1 GB se truncar)  |
+| Disco (corpus atual 8k)       | 768 × 4 B × 8k = ~25 MB                        | 1536 dim → ~50 MB           |
+| Disco (projeção 33k)          | ~100 MB                                        | ~200 MB (ou 100 MB se trunc) |
+| Dependência de internet       | Não                                            | Sim (queries síncronas)     |
+
+### 3.5 Pipeline de ingestão contínua (requisito novo)
+
+Conforme §1.4, novos laudos entram continuamente. Esboço da pipeline:
+
+```
+[report-generate finaliza DOCX]
+        ↓ event/hook
+[fila ingestion-queue] (BullMQ/Postgres-LISTEN)
+        ↓
+[ingest worker]
+   1. extrai texto da seção "DISCUSSÃO DOS RESULTADOS"
+   2. extrai captions de figuras (metallography)
+   3. embed(text) via EmbeddingProvider configurado
+   4. chroma.upsert(id_relatorio, embeddings, metadatas)
+        ↓
+[report_texts + metallography_captions atualizadas]
+```
+
+Pontos de decisão:
+
+- **Sincronia**: ingestão é **assíncrona** (fila) — não bloqueia a geração
+  do DOCX. SLA aceitável: ~1 min entre gerar e ficar buscável.
+- **Idempotência**: o `id_relatorio` é a chave de upsert; re-rodar a
+  ingestão para o mesmo relatório substitui em vez de duplicar.
+- **Retry**: falha de API OpenAI → backoff exponencial; falha persistente
+  → dead-letter queue + alerta.
+- **Custo por laudo** (3-small Standard, ~4–5k tokens texto + 100 captions
+  de ~50 tok cada = ~9–10k tok): **~US$ 0.0002 por laudo**. Irrisório.
+- **Onde mora a fila**: o monorepo já tem Postgres (`libs/db-lib`). Sugestão:
+  usar **`pg-boss`** ou tabela própria com `LISTEN/NOTIFY` — evita adicionar
+  Redis só para isso. Detalhar na sprint seguinte.
+- **Versionamento do embedder**: gravar `embedding_model_version` na
+  metadata de cada chunk. Se o embedder mudar, é trivial saber o que
+  precisa ser reindexado.
 
 ---
 
@@ -218,19 +300,31 @@ geralmente superam MPNet em PT-BR sem custo recorrente nem saída de dados).
 
 ### 7.1 Dataset de avaliação
 
-- **Golden set**: 50–100 pares `(pergunta, id_relatorio_esperado)` curados pelo
-  time de domínio (engenheiros de laudo). Sem isso, nenhuma métrica é confiável.
-- **Pool de chunks**: cópia da coleção `report_texts` atual.
+- **Golden set sintético**: **234 queries em 78 chunks já gerado** em
+  `apps/chroma-server/bench/golden-set.synthetic.csv`, via
+  `generate-synthetic-golden.py`. Distribuição cobre Caldeira, Permutador,
+  Vaso Separador, Válvula de Segurança, Eixo de Bomba e mais ~20 tipos de
+  equipamento. **Viés conhecido**: queries usam vocabulário dos próprios
+  chunks (inflam Recall vs queries humanas reais). É um **piso**, não teto.
+- **Golden set humano** (idealmente substitui o sintético): 50–100 pares
+  curados pelo time de domínio. Não estará pronto na review — tratamos o
+  sintético como métrica oficial nesta sprint e re-rodamos com o humano
+  quando vier.
+- **Pool de chunks**: coleção `report_texts` atual (78 chunks).
 
 ### 7.2 Variantes a medir
 
-| ID | Embedding                              | Dim  | Store          |
-|----|----------------------------------------|------|----------------|
-| V1 | Xenova MPNet (baseline)                | 768  | Chroma local   |
-| V2 | `text-embedding-3-small` (dim=768)     | 768  | Chroma local   |
-| V3 | `text-embedding-3-small` (dim=1536)    | 1536 | Chroma local   |
-| V4 | `text-embedding-3-large` (dim=3072)    | 3072 | Chroma local   |
-| V5 | BGE-m3 local *(opcional, controle)*    | 1024 | Chroma local   |
+| ID  | Embedding                              | Dim  | Store          | Observação |
+|-----|----------------------------------------|------|----------------|------------|
+| **V1a** | **Status quo (com mismatch)**: índice fine-tuned, query Xenova vanilla | 768 | `report_texts` original | Mede o que está em produção HOJE |
+| V1b | Xenova vanilla coerente (reindex + query com Xenova vanilla) | 768 | nova coleção | Isola o efeito do mismatch |
+| V2  | `text-embedding-3-small` (dim=768)     | 768  | Chroma local   | Truncável, dimensão igual ao baseline |
+| V3  | `text-embedding-3-small` (dim=1536)    | 1536 | Chroma local   | Default do modelo |
+| V4  | `text-embedding-3-large` (dim=3072)    | 3072 | Chroma local   | Topo de linha OpenAI |
+| V5  | BGE-m3 local *(opcional, controle)*    | 1024 | Chroma local   | Alternativa open-source forte |
+
+> A diferença **V1a vs V1b** é o experimento que confirma/refuta o bug do
+> §1.3. Se V1b ≫ V1a, o problema é configuração, não modelo.
 
 ### 7.3 Métricas
 
@@ -246,15 +340,20 @@ geralmente superam MPNet em PT-BR sem custo recorrente nem saída de dados).
 
 ### 7.4 Script de execução
 
-A criar em `apps/chroma-server/bench/`:
+**Já implementado** em `apps/chroma-server/bench/`:
 
-- `prepare.py` — gera as 5 coleções variantes a partir do corpus.
-- `run-queries.ts` — executa o golden set em cada variante, salva CSV.
-- `score.py` — calcula Recall/MRR/nDCG, exporta tabela e gráficos
-  (`matplotlib`/`seaborn`) prontos pra apresentação.
+- `generate-synthetic-golden.py` — gera golden set sintético via heurísticas
+  ou LLM. **Já executado**: 234 queries em `golden-set.synthetic.csv`.
+- `prepare.py` — gera as variantes (V1b/V2/V3/V4/V5) a partir do corpus.
+  V1a reusa a coleção fonte.
+- `run-queries.ts` — executa o golden set em cada variante, salva CSV de
+  latência e ranking.
+- `score.py` — calcula Recall@k, MRR, nDCG@10 + p50/p95/p99 de latência;
+  gera `summary.csv`, `latency.csv` e PNGs prontos pra apresentação.
 
-Esforço estimado: **2–3 dias** para o script + ~1 dia para curar o golden set
-com o domínio. Sem o golden set, qualquer comparação vira opinião.
+Esforço restante: **~1 dia** para subir o `chroma-server`, rodar `prepare`
+(custo ~$0.05 com OpenAI v3 small e large somados, em Batch) e executar
+`run-queries.ts` + `score.py` contra o golden sintético.
 
 ---
 
@@ -270,40 +369,79 @@ com o domínio. Sem o golden set, qualquer comparação vira opinião.
 
 ---
 
-## 9. Fontes / dados externos confirmados
+## 9. Fontes / dados confirmados
 
-Verificado em 2026-06-01:
+### 9.1 Dados externos (web, 2026-06-01)
 
 - **Pricing OpenAI** (Standard / Batch −50%): `3-small` $0.020/$0.010,
   `3-large` $0.130/$0.065 por 1M tokens; `gpt-4o-mini` $0.15 in / $0.60 out;
   `gpt-4.1-mini` $0.40 in / $1.60 out; `gpt-4o` $2.50/$10; `gpt-4.1` $2/$8.
 - **Cap de input** dos embeddings v3: 8191 tokens/request.
-- **Performance OpenAI v3 (oficial)**: MTEB médio passou de 61.0% (ada-002)
-  para 62.3% (`3-small`); MIRACL multilíngue 31.4% → 44.0%; redução de
-  dimensão via parâmetro `dimensions` (Matryoshka representation learning)
-  com perda mínima de qualidade.
+- **Performance OpenAI v3 (oficial)**: MTEB médio 61.0% (ada-002) → 62.3%
+  (`3-small`); **MIRACL multilíngue 31.4% → 44.0%**; redução de dimensão via
+  `dimensions` (Matryoshka) com perda mínima.
 - **Dim padrão**: `3-small` 1536 (truncável até 256), `3-large` 3072
-  (truncável). `paraphrase-multilingual-mpnet-base-v2`: 768 dim, fixa.
+  (truncável). MPNet vanilla: 768 dim, fixa.
 
-Itens a confirmar **com o bench (§7)**, não no documento:
+### 9.2 Dados internos do projeto (inspeção direta no repo + sqlite)
 
-- Recall/MRR/nDCG concretos por variante no nosso corpus.
-- Latência real do `chroma-server` atual sob carga.
-- Distribuição de tokens por chunk (para validar premissa de 400 tok).
+- Coleções no `chroma_db_finetune/chroma.sqlite3`: `report_texts` (78 chunks,
+  1 por relatório, seção "DISCUSSÃO DOS RESULTADOS") + `metallography_captions`
+  (7.943 chunks). Total **8.021 chunks**.
+- Tamanho médio do chunk de `report_texts`: **~400 tokens** (~1.600 caracteres).
+- Modelo de **indexação** registrado nos metadados Chroma:
+  `models/fine_tuned_report_model` (sentence-transformer fine-tunado pelo time;
+  **não está no repo**).
+- Modelo de **query** em produção: `Xenova/paraphrase-multilingual-mpnet-base-v2`
+  (vanilla, ONNX em Node — `chroma.service.ts:97`). **→ mismatch §1.3.**
+- 78 relatórios distintos, **100% Análise de Falha (AF)**, cliente
+  predominante PETROBRÁS COMPARTILHADO. Tipos: Caldeira, Permutador,
+  Vaso Separador, Válvula, Eixo, Cilindro, Tubos, etc.
+
+### 9.3 Itens a confirmar **com o bench (§7)**
+
+- Recall@k / MRR / nDCG@10 concretos das 6 variantes (V1a, V1b, V2–V5) no
+  golden set sintético.
+- p50/p95/p99 reais do `chroma-server` em CPU.
+- Magnitude do impacto do mismatch (V1a vs V1b).
+- Diferença de Recall do golden sintético vs queries humanas (quando o
+  golden curado vier).
 
 ---
 
 ## 10. TL;DR para a apresentação
 
-1. **Embedding não é o custo**: indexar 100k chunks na OpenAI custa < US$ 1.
-   O LLM gerador é o item caro — decidir lá primeiro.
-2. **Qualidade**: `text-embedding-3-small` tende a superar MPNet em PT-BR;
-   provar no bench (§7) antes de migrar.
-3. **Latência**: equivalente em pipeline RAG (LLM domina). Local perde em
-   ingestão batch (CPU); OpenAI perde em cold start de rede.
-4. **Stack proposta**: Chroma → mantém / `pgvector` no roadmap; embedding
-   `text-embedding-3-small@768` com fallback Xenova feature-flagged; LLM
-   `gpt-4o-mini` como ponto de partida.
-5. **Pré-condição inegociável**: DPA + ZDR + mascaramento antes de mandar
-   dado de laudo para fora.
-6. **Próximo passo concreto**: curar golden set + rodar bench §7.
+1. **Corpus é pequeno e técnico**: 8k chunks (78 laudos + ~8k captions de
+   metalografia). Custo de qualquer embedding é **irrelevante** (< US$ 0.40
+   re-indexa tudo no `3-large`). O desafio é **precisão semântica em
+   jargão de inspeção**, não escala.
+2. **Bug detectado em produção (§1.3)**: o Chroma foi indexado com um
+   modelo fine-tuned (`fine_tuned_report_model`) que **não está no repo**,
+   mas as queries usam Xenova vanilla. **Mismatch garantido** — Recall
+   atual está abaixo do real. Resolver antes/junto da migração.
+3. **Ingestão contínua é parte do escopo (§3.5)**: pipeline event-driven
+   após `report-generate`, fila no Postgres existente, idempotente, custo
+   ~US$ 0.0002 por laudo com `3-small`.
+4. **Embedding não é o custo**: o LLM gerador é. Decidir lá primeiro
+   (`gpt-4o-mini` como entrada, ~US$ 0.0008/resposta).
+5. **Qualidade**: dados oficiais OpenAI mostram **+12.6pp em MIRACL
+   multilíngue** (relevante para PT-BR) vs ada-002. MPNet vanilla é de
+   2021. Tendência clara, mas **provar com o bench** antes de migrar.
+6. **Stack proposta**: Chroma mantém no curto prazo, `pgvector` no roadmap
+   (elimina o `chroma-server` Python); embedder
+   `text-embedding-3-small@768` (compatibilidade dimensional) com fallback
+   Xenova feature-flagged; LLM `gpt-4o-mini` baseline; mascaramento + DPA
+   + ZDR como pré-condição inegociável.
+7. **Pendência humana**: golden set curado pelo time de domínio. Enquanto
+   não vem, usamos o **golden sintético já gerado** (234 queries) como
+   piso de qualidade.
+
+### 10.1 Próximos passos concretos
+
+| # | Ação | Esforço | Bloqueia |
+|---|------|---------|----------|
+| 1 | Subir `chroma-server` + rodar `prepare.py` para V1b/V2/V3/V4 | ~2h | Bench |
+| 2 | Executar `run-queries.ts` + `score.py` com `golden-set.synthetic.csv` | ~1h | Apresentação |
+| 3 | Decidir destino do `fine_tuned_report_model` (manter, descontinuar, versionar) | discussão | Stack final |
+| 4 | Implementar pipeline de ingestão contínua (§3.5) | 3–5 dias | Produção |
+| 5 | Curar 50–100 pares humanos do golden set | depende do domínio | Validação final |
