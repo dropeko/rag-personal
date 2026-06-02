@@ -1,32 +1,14 @@
 """
-build_pptx.py — Refaz o deck Digital Labs com texto enxuto e dados objetivos.
+build_pptx.py — Deck Digital Labs, 16 slides, com clonagem que preserva imagens.
 
-Limites por shape derivados do template (em chars):
-
-  Cover/closing (87pt huge):        ≤ 18 chars/linha · 2 linhas max
-  Promessa headline (87pt huge):    ≤ 22 chars total (1-2 linhas)
-  Promessa subtitle (21pt):         ≤ 100 chars (~2 linhas em 7.6")
-  Visão produto headline (54pt):    ≤ 28 chars (1-2 linhas em 7.77")
-  Visão produto subtitle (21pt):    ≤ 110 chars
-  3 módulos headline (54pt):        ≤ 24 chars (em 6.10")
-  3 cards problema headline (54pt): ≤ 30 chars (em 7.78")
-  3 cards problema sub (21pt):      ≤ 80 chars (em 7.78")
-  Card 01 (shape 11 estreito):      ≤ 75 chars body (16.5pt)
-  Cards 02/03 (shape 18/25):        ≤ 80 chars body (16.5pt)
-  Módulo card body (16.5pt):        ≤ 75 chars (em 5.0")
-  Casos de uso body (16.5pt):       ≤ 65 chars (em 4.68")
-  Antes/depois headline (34.5pt):   ≤ 16 chars total
-  Antes/depois col headline (28.5pt): ≤ 35 chars
-  Antes/depois col body (16.5pt):   ≤ 130 chars
-  4 fases headline (34.5pt):        ≤ 26 chars
-  4 fases title (23pt):             ≤ 11 chars
-  4 fases body (16.5pt):            ≤ 55 chars
-  Pull quote (52.5pt):              ≤ 100 chars
-  Prova huge (100.5pt):             ≤ 5 chars
-  Prova subtitle (22.5pt):          ≤ 80 chars total
+Corrige bug crítico: a clonagem anterior copiava só o XML; rIds de imagens
+ficavam apontando para relacionamentos inexistentes no slide novo, e as imagens
+do template (objetos de fundo dos cards) sumiam nos clones (slides 6, 13, 15).
+Agora copio também as relações e remapeio os rIds dentro do XML clonado.
 """
 from copy import deepcopy
 from pathlib import Path
+
 from pptx import Presentation
 
 TEMPLATE = "/tmp/template.pptx"
@@ -34,15 +16,37 @@ OUT = Path(__file__).resolve().parent.parent / "references" / "Apresentacao_RAG_
 
 prs = Presentation(TEMPLATE)
 TEMPLATE_SLIDES = list(prs.slides)
-TOTAL = 17
+TOTAL = 16
+
+R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
 
 def clone_slide(src_slide):
+    """Clona slide preservando imagens e demais partes referenciadas por rId."""
     new_slide = prs.slides.add_slide(src_slide.slide_layout)
+
+    # Remove shapes default do layout
     for shp in list(new_slide.shapes):
         shp._element.getparent().remove(shp._element)
+
+    # Copia relações (imagens, themeOverride, etc.) e monta rId_map
+    rId_map = {}
+    for rel in src_slide.part.rels.values():
+        if "slideLayout" in rel.reltype:
+            continue  # layout já foi linkado pelo add_slide
+        new_rId = new_slide.part.relate_to(rel.target_part, rel.reltype)
+        rId_map[rel.rId] = new_rId
+
+    # Copia shapes (XML) reescrevendo rIds para os novos
     for shp in src_slide.shapes:
-        new_slide.shapes._spTree.append(deepcopy(shp._element))
+        new_el = deepcopy(shp._element)
+        for node in new_el.iter():
+            for attr in (f"{R_NS}embed", f"{R_NS}link", f"{R_NS}id"):
+                val = node.get(attr)
+                if val and val in rId_map:
+                    node.set(attr, rId_map[val])
+        new_slide.shapes._spTree.append(new_el)
+
     return new_slide
 
 
@@ -54,7 +58,6 @@ def find_shape(slide, name):
 
 
 def set_paragraphs(shape, lines):
-    """Preserva formatação; deixa parágrafos vazios verdadeiramente vazios."""
     if not shape.has_text_frame:
         return
     tf = shape.text_frame
@@ -94,11 +97,10 @@ def set_table_cells(shape, mapping):
 
 
 def reorder_slides(prs, slides_in_order):
-    ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
     sldIdLst = prs.slides._sldIdLst
     by_partname = {}
     for sldId in list(sldIdLst):
-        rId = sldId.attrib[f"{ns}id"]
+        rId = sldId.attrib[f"{R_NS}id"]
         part = prs.part.related_part(rId)
         by_partname[part.partname] = sldId
         sldIdLst.remove(sldId)
@@ -107,7 +109,7 @@ def reorder_slides(prs, slides_in_order):
 
 
 # ============================================================================
-# 17 builders — texto enxuto, dados objetivos
+# Builders — texto enxuto + contexto explicativo
 # ============================================================================
 
 def b_cover(s):
@@ -117,7 +119,7 @@ def b_cover(s):
     set_paragraphs(find_shape(s, "object 6"), [
         "Stack de RAG",
         "para inspeção.",
-        "ChromaDB local vs. OpenAI Embeddings. "
+        "Comparativo ChromaDB local vs. OpenAI Embeddings + API. "
         "Embedder, vector store, LLM e ingestão contínua.",
     ])
     set_paragraphs(find_shape(s, "object 9"), ["ANÁLISE  /  16 : 9"])
@@ -135,22 +137,22 @@ def b_roteiro(s):
         (1, 0): "03\tCorpus e ingestão contínua",
         (1, 2): "\n04",
         (1, 3): "Custos e latência",
-        (2, 0): "05\tBench parcial — resultados",
+        (2, 0): "05\tBench parcial e proposta",
         (2, 2): "\n06",
-        (2, 3): "Proposta e próximos passos",
+        (2, 3): "Critérios e próximos passos",
     })
     set_paragraphs(find_shape(s, "object 9"), [f"02 / {TOTAL}"])
 
 
 def b_sumario(s):
-    # promessa central — 87pt headline curto + 21pt sub curto
     set_paragraphs(find_shape(s, "object 3"), [
         "SUMÁRIO EXECUTIVO",
         "",
         "",
-        "Precisão, não escala.",  # 21 chars
-        "Corpus de 8.021 chunks. Bug atual entre indexação e consulta. "
-        "Embedding custa centavos; a decisão está no retrieval e no LLM gerador.",  # 132 chars (~3 linhas)
+        "Precisão, não escala.",
+        # 130 chars — 3 linhas em 21pt
+        "Corpus de 8.021 chunks: pequeno e técnico. Um bug entre indexação "
+        "e consulta já degrada o retrieval hoje. O embedding custa centavos.",
     ])
     set_paragraphs(find_shape(s, "object 6"), [f"03 / {TOTAL}"])
 
@@ -158,33 +160,39 @@ def b_sumario(s):
 def b_descobertas(s):
     set_paragraphs(find_shape(s, "object 2"), ["ACHADOS"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "Três achados que",            # 16 chars 54pt
-        "mudam a sprint.",             # 15 chars 54pt
-        "Direto do chroma.sqlite3 e do código do db-backend.",  # 51 chars 21pt
+        "Três achados que",
+        "mudam a sprint.",
+        "Levantados direto no chroma.sqlite3 e no código do db-backend.",
         "",
     ])
     set_paragraphs(find_shape(s, "object 10"), ["01", "Mismatch"])
     set_paragraphs(find_shape(s, "object 11"), [
-        "Indexação usa fine-tunado; consulta usa MPNet vanilla.",  # 54 chars
+        # 70 chars — cabe no body estreito
+        "Indexação e consulta usam modelos diferentes; o recall sai degradado.",
     ])
     set_paragraphs(find_shape(s, "object 18"), [
         "02", "Corpus pequeno",
-        "78 laudos e 7.943 captions de metalografia. Chunk médio: 400 tokens.",  # 67 chars
+        # 95 chars
+        "78 laudos completos e 7.943 captions de metalografia. "
+        "Chunk médio de 400 tokens, denso e técnico.",
     ])
     set_paragraphs(find_shape(s, "object 25"), [
         "03", "Ingestão contínua",
-        "Novos laudos precisam de pipeline assíncrono — ainda não desenhado.",  # 67 chars
+        # 90 chars
+        "Novos laudos precisam ser indexados de forma automática. "
+        "O pipeline ainda não está desenhado.",
     ])
     set_paragraphs(find_shape(s, "object 28"), [f"04 / {TOTAL}"])
 
 
 def b_stack_atual(s):
-    # visão do produto — 54pt headline + 21pt sub
     set_paragraphs(find_shape(s, "object 2"), ["STACK ATUAL"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "Chroma local + fine-tunado interno.",   # 35 chars 54pt → 2-3 linhas
-        "NestJS via chromadb (JS). Index com fine-tunado (ml_wo); "
-        "consultas com MPNet vanilla.",          # 85 chars 21pt
+        "Chroma + fine-tunado.",   # 21 chars
+        # 145 chars
+        "Backend NestJS consulta o Chroma via cliente JS. Os vetores foram indexados "
+        "com modelo fine-tunado interno (ml_wo); as consultas em produção usam "
+        "MPNet vanilla — origem do bug.",
     ])
     set_paragraphs(find_shape(s, "object 8"), ["STACK / ml_wo"])
     set_paragraphs(find_shape(s, "object 9"), ["V 1"])
@@ -197,185 +205,204 @@ def b_stack_atual(s):
 def b_bug_detalhe(s):
     set_paragraphs(find_shape(s, "object 2"), ["MISMATCH"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "Índice e consulta",              # 17 chars
-        "usam modelos diferentes.",       # 24 chars
-        "Resultado: espaços vetoriais incompatíveis em produção.",  # 56 chars
+        "Índice e consulta",
+        "usam modelos diferentes.",
+        "O resultado é simples: vetores indexados e vetores de consulta vivem em espaços distintos.",
         "",
     ])
     set_paragraphs(find_shape(s, "object 10"), ["01", "Indexação"])
     set_paragraphs(find_shape(s, "object 11"), [
-        "fine_tuned_report_model — 768 dim. Fora do repositório.",  # 56 chars
+        # 70 chars — body estreito
+        "fine_tuned_report_model — 768 dim, ativo do ml_wo, fora do repositório.",
     ])
     set_paragraphs(find_shape(s, "object 18"), [
         "02", "Consulta",
-        "Xenova/MPNet vanilla em ONNX — 768 dim. Aplicado em cada chamada.",  # 65 chars
+        # 95 chars
+        "Xenova/MPNet vanilla em ONNX no Node, 768 dim. "
+        "Aplicado a cada consulta de produção.",
     ])
     set_paragraphs(find_shape(s, "object 25"), [
         "03", "Consequência",
-        "Recall degradado. Magnitude só será medida no bench neural.",  # 60 chars
+        # 110 chars
+        "O recall do retrieval atual está abaixo do potencial. "
+        "A magnitude do impacto só será medida no bench neural.",
     ])
     set_paragraphs(find_shape(s, "object 28"), [f"06 / {TOTAL}"])
 
 
 def b_corpus_real(s):
-    # antes/depois — headline curto + 2 colunas
     set_paragraphs(find_shape(s, "object 2"), ["CORPUS"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "78 laudos",          # 9 chars 34.5pt
-        "+ 7.943 captions.",  # 17 chars 34.5pt
+        "78 laudos",
+        "+ 7.943 captions.",
     ])
     set_paragraphs(find_shape(s, "object 7"), ["report_texts"])
     set_paragraphs(find_shape(s, "object 8"), [
-        "78 chunks — um por laudo.",       # 25 chars 28.5pt
-        "Seção “Discussão dos Resultados”. ~400 tokens por chunk. "
-        "100 % Análise de Falha PETROBRÁS.",   # 90 chars 16.5pt
+        "78 chunks — um por laudo.",
+        # 125 chars
+        "Cada chunk é a seção “Discussão dos Resultados” do laudo. "
+        "Em média 400 tokens; 100 % são Análises de Falha PETROBRÁS.",
     ])
     set_paragraphs(find_shape(s, "object 12"), ["captions"])
     set_paragraphs(find_shape(s, "object 13"), [
-        "7.943 captions",          # 14 chars 28.5pt
-        "de metalografia.",        # 16 chars 28.5pt
-        "~100 captions por laudo. Atende consultas onde a resposta "
-        "está na imagem, não no texto.",   # 87 chars 16.5pt
+        "7.943 captions",
+        "de metalografia.",
+        # 110 chars
+        "Cerca de cem captions por laudo. Atendem consultas em que a "
+        "resposta está na imagem, não no texto principal.",
     ])
     set_paragraphs(find_shape(s, "object 16"), [f"07 / {TOTAL}"])
 
 
 def b_ingestao(s):
-    # 4 fases — headline curto + 4 cards
     set_paragraphs(find_shape(s, "object 2"), ["INGESTÃO CONTÍNUA"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "Novo laudo buscável em < 1 minuto.",   # 34 chars 34.5pt
+        "Novo laudo buscável em até um minuto.",
     ])
     set_paragraphs(find_shape(s, "object 5"), ["01"])
     set_paragraphs(find_shape(s, "object 6"), [
         "Gerar",
-        "report-generate finaliza o DOCX e emite evento.",   # 47 chars
+        "report-generate fecha o DOCX e emite evento.",
     ])
     set_paragraphs(find_shape(s, "object 8"), ["02"])
     set_paragraphs(find_shape(s, "object 9"), [
         "Enfileirar",
-        "Fila no Postgres existente (pg-boss).",   # 37 chars
+        "Fila no Postgres existente (pg-boss).",
     ])
     set_paragraphs(find_shape(s, "object 11"), ["03"])
     set_paragraphs(find_shape(s, "object 12"), [
         "Indexar",
-        "Worker embeda e faz upsert idempotente.",   # 39 chars
+        "Worker embeda e faz upsert idempotente.",
     ])
     set_paragraphs(find_shape(s, "object 14"), ["04"])
     set_paragraphs(find_shape(s, "object 15"), [
         "Servir",
-        "Coleção atualizada; busca enxerga o laudo.",   # 42 chars
+        "Coleção atualizada; busca enxerga o laudo.",
     ])
     set_paragraphs(find_shape(s, "object 18"), [f"08 / {TOTAL}"])
 
 
 def b_opcoes(s):
-    # arquitetura de valor — headline curto + 3 módulos
     set_paragraphs(find_shape(s, "object 2"), ["OPÇÕES"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "Três caminhos,",     # 14 chars 54pt
-        "mesmo bench.",       # 12 chars 54pt
+        "Três caminhos,",
+        "mesmo bench.",
     ])
     set_paragraphs(find_shape(s, "object 10"), [
         "Opção A", "Status quo coerente",
-        "Reindex com vanilla. Chroma local. Corrige o bug sem migrar.",  # 60 chars
+        # 95 chars
+        "Reindexar com MPNet vanilla. Corrige o bug, mantém o Chroma local, "
+        "sem dependência externa.",
     ])
     set_paragraphs(find_shape(s, "object 17"), [
         "Opção B", "OpenAI Embeddings",
-        "text-embedding-3-small @768 via API. A/B sem refazer schema.",  # 61 chars
+        # 85 chars
+        "text-embedding-3-small @768 via API. A/B sem refazer schema; "
+        "ganho de qualidade.",
     ])
     set_paragraphs(find_shape(s, "object 24"), [
         "Opção C", "Híbrida",
-        "OpenAI + pgvector no Postgres. Sem chroma-server Python.",  # 56 chars
+        # 90 chars
+        "OpenAI + pgvector no Postgres existente. "
+        "Elimina o chroma-server Python da operação.",
     ])
     set_paragraphs(find_shape(s, "object 27"), [f"09 / {TOTAL}"])
 
 
 def b_custos(s):
-    # casos de uso — headline curto + 3 cards com números
     set_paragraphs(find_shape(s, "object 2"), ["CUSTOS"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "Embedding ≠",       # 11 chars 54pt
-        "custo real.",       # 11 chars 54pt
+        "Embedding ≠",
+        "custo real.",
     ])
     set_paragraphs(find_shape(s, "object 10"), [
         "Item 01", "Indexação",
-        "Corpus completo: US$ 0,06 Standard · US$ 0,03 Batch.",  # 53 chars
+        # 80 chars
+        "Reindex completo do corpus: US$ 0,06 em Standard ou US$ 0,03 em Batch.",
     ])
     set_paragraphs(find_shape(s, "object 17"), [
         "Item 02", "Consulta",
-        "US$ 0,0000006 por chamada. 100 k/mês = US$ 0,06.",  # 48 chars
+        # 75 chars
+        "Cerca de US$ 0,0000006 por chamada. 100 mil consultas/mês: US$ 0,06.",
     ])
     set_paragraphs(find_shape(s, "object 24"), [
         "Item 03", "LLM gpt-4o-mini",
-        "US$ 0,0008 por resposta. 10 k/mês = US$ 8.",  # 42 chars
+        # 95 chars
+        "US$ 0,0008 por resposta (3 k entrada + 500 saída). "
+        "10 mil/mês: US$ 8. O custo real mora aqui.",
     ])
     set_paragraphs(find_shape(s, "object 27"), [f"10 / {TOTAL}"])
 
 
 def b_latencia(s):
-    # antes/depois — números objetivos lado a lado
     set_paragraphs(find_shape(s, "object 2"), ["LATÊNCIA"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "Embedder estimado;",   # 18 chars 34.5pt
-        "store medido.",        # 13 chars 34.5pt
+        "Embedder estimado;",
+        "store medido.",
     ])
     set_paragraphs(find_shape(s, "object 7"), ["Estimativa"])
     set_paragraphs(find_shape(s, "object 8"), [
-        "Embedder e LLM dominam.",      # 23 chars 28.5pt
-        "1 query: 80–250 ms local · 60–180 ms OpenAI. "
-        "LLM 4o-mini: 1,5–4 s por resposta.",   # 80 chars 16.5pt
+        "Embedder e LLM dominam.",
+        # 110 chars
+        "Embedding de 1 query: 80–250 ms local ou 60–180 ms via OpenAI. "
+        "LLM gpt-4o-mini: 1,5–4 s por resposta.",
     ])
-    set_paragraphs(find_shape(s, "object 12"), ["Medido 2026-06-01"])
+    set_paragraphs(find_shape(s, "object 12"), ["Bench 2026-06"])
     set_paragraphs(find_shape(s, "object 13"), [
-        "Chroma HNSW",                  # 11 chars 28.5pt
-        "não é gargalo.",               # 14 chars 28.5pt
-        "p50: 4,58 ms (78 docs) · 5,08 ms (7.943 docs). "
-        "p99: 5,99 ms · 6,97 ms.",   # 70 chars 16.5pt
+        "Chroma HNSW",
+        "não é gargalo.",
+        # 100 chars
+        "p50: 4,58 ms (78 docs) e 5,08 ms (7.943 docs). "
+        "p99: 5,99 ms e 6,97 ms, respectivamente.",
     ])
     set_paragraphs(find_shape(s, "object 16"), [f"11 / {TOTAL}"])
 
 
 def b_tfidf(s):
-    # prova e evidência — número único enorme
     set_paragraphs(find_shape(s, "object 2"), [
-        "BENCH — 2026-06-01",   # 18 chars 11pt
-        "67 %",                  # 4 chars 100.5pt
-        "Recall@5 do baseline TF-IDF — piso a superar.",  # 47 chars 22.5pt → 2 linhas
-        "234 consultas, 78 chunks.",                       # 25 chars 22.5pt → 1 linha
+        "BENCH — 2026-06-01",
+        "67 %",
+        # 55 chars
+        "Recall@5 do baseline TF-IDF — o piso a superar.",
+        "234 consultas sintéticas contra 78 chunks.",
     ])
     set_paragraphs(find_shape(s, "object 5"), [f"12 / {TOTAL}"])
 
 
 def b_stack_proposta(s):
-    # arquitetura — 3 decisões
     set_paragraphs(find_shape(s, "object 2"), ["PROPOSTA"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "Três decisões",      # 13 chars 54pt
-        "para a stack.",      # 13 chars 54pt
+        "Três decisões",
+        "para a stack.",
     ])
     set_paragraphs(find_shape(s, "object 10"), [
         "Decisão 1", "Embedder",
-        "text-embedding-3-small @768. Xenova como fallback.",  # 50 chars
+        # 90 chars
+        "text-embedding-3-small @768 dim. Compatível com a coleção atual; "
+        "Xenova como fallback.",
     ])
     set_paragraphs(find_shape(s, "object 17"), [
         "Decisão 2", "Vector store",
-        "Chroma agora; pgvector no Postgres entra no roadmap.",  # 53 chars
+        # 90 chars
+        "Chroma local segue no curto prazo. pgvector no Postgres existente "
+        "entra no roadmap.",
     ])
     set_paragraphs(find_shape(s, "object 24"), [
         "Decisão 3", "LLM gerador",
-        "gpt-4o-mini baseline. Subir só com sinal de regressão.",  # 55 chars
+        # 90 chars
+        "gpt-4o-mini como baseline. Subir para gpt-4.1-mini somente com "
+        "sinal de regressão.",
     ])
     set_paragraphs(find_shape(s, "object 27"), [f"13 / {TOTAL}"])
 
 
 def b_criterios(s):
-    # pull quote 52.5pt — máximo ~100 chars
     set_paragraphs(find_shape(s, "object 2"), ["CRITÉRIOS"])
     set_paragraphs(find_shape(s, "object 3"), [
+        # 80 chars 52.5pt
         "“Migrar para OpenAI somente se Recall@5 ≥ +5 pp, "
-        "MRR ≥ +0,05 e p95 ≤ 400 ms.”",   # 80 chars 52.5pt
-        "DPA · ZDR · MASCARAMENTO DE PII COMO PRÉ-CONDIÇÕES",  # 50 chars 13.5pt
+        "MRR ≥ +0,05 e p95 ≤ 400 ms.”",
+        "DPA  ·  ZDR  ·  MASCARAMENTO DE PII COMO PRÉ-CONDIÇÕES",
     ])
     set_paragraphs(find_shape(s, "object 6"), [f"14 / {TOTAL}"])
 
@@ -383,71 +410,60 @@ def b_criterios(s):
 def b_restricao(s):
     set_paragraphs(find_shape(s, "object 2"), ["BLOQUEIO"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "A TI ainda não",        # 15 chars 54pt
-        "liberou a rede.",       # 15 chars 54pt
-        "Bench parcial entregue; bench neural depende de liberação.",  # 60 chars 21pt
+        "A TI ainda não",
+        "liberou a rede.",
+        "Bench parcial entregue; bench neural depende de liberação.",
         "",
     ])
     set_paragraphs(find_shape(s, "object 10"), ["01", "huggingface.co"])
     set_paragraphs(find_shape(s, "object 11"), [
-        "MPNet, BGE-m3 e demais open source. Liberação pontual.",  # 56 chars
+        # 70 chars
+        "Necessário para baixar MPNet, BGE-m3 e demais open source.",
     ])
     set_paragraphs(find_shape(s, "object 18"), [
         "02", "api.openai.com",
-        "Embeddings v3 e LLM gerador. Liberação permanente, allowlist.",  # 61 chars
+        # 95 chars
+        "Necessário para embeddings v3 e para o LLM gerador. "
+        "Liberação permanente com allowlist.",
     ])
     set_paragraphs(find_shape(s, "object 25"), [
         "03", "Plano B",
-        "Bench em estação pessoal. Scripts reproduzíveis em ~3 horas.",  # 60 chars
+        # 95 chars
+        "Rodar o bench numa estação pessoal com rede aberta. "
+        "Scripts reproduzíveis em três horas.",
     ])
     set_paragraphs(find_shape(s, "object 28"), [f"15 / {TOTAL}"])
 
 
 def b_proximos_passos(s):
-    # 4 fases — headline curto + 4 fases compactas
     set_paragraphs(find_shape(s, "object 2"), ["PRÓXIMOS PASSOS"])
     set_paragraphs(find_shape(s, "object 3"), [
-        "Quatro frentes em paralelo.",   # 27 chars 34.5pt
+        "Quatro frentes em paralelo.",
     ])
     set_paragraphs(find_shape(s, "object 5"), ["01"])
     set_paragraphs(find_shape(s, "object 6"), [
         "Liberar",
-        "Chamado TI: huggingface.co + api.openai.com.",   # 44 chars
+        "Chamado TI: huggingface.co + api.openai.com.",
     ])
     set_paragraphs(find_shape(s, "object 8"), ["02"])
     set_paragraphs(find_shape(s, "object 9"), [
         "Rodar",
-        "prepare.py + run-queries + score.py com chave OpenAI.",   # 53 chars
+        "prepare.py + run-queries + score.py com chave OpenAI.",
     ])
     set_paragraphs(find_shape(s, "object 11"), ["03"])
     set_paragraphs(find_shape(s, "object 12"), [
         "Decidir",
-        "Destino do fine_tuned_report_model.",   # 35 chars
+        "Destino do fine_tuned_report_model.",
     ])
     set_paragraphs(find_shape(s, "object 14"), ["04"])
     set_paragraphs(find_shape(s, "object 15"), [
         "Implantar",
-        "Pipeline de ingestão sobre o Postgres existente.",   # 48 chars
+        "Pipeline de ingestão sobre o Postgres existente.",
     ])
     set_paragraphs(find_shape(s, "object 18"), [f"16 / {TOTAL}"])
 
 
-def b_proxima_decisao(s):
-    # closing — 87pt headline curto
-    set_paragraphs(find_shape(s, "object 3"), ["NIT-DEV  /  DROPEKO"])
-    set_paragraphs(find_shape(s, "object 4"), ["ISQ DIGITAL LABS"])
-    set_paragraphs(find_shape(s, "object 5"), [
-        "PRÓXIMA DECISÃO",
-        "",
-        "",
-        "Liberar a TI.",      # 13 chars 87pt — 1-2 linhas
-        "Com a rede liberada, o bench neural sai em uma tarde. "
-        "Sem ela, a stack fica travada no piso do TF-IDF.",   # 100 chars 21pt
-    ])
-    set_paragraphs(find_shape(s, "object 8"), [f"17 / {TOTAL}"])
-
-
-# ---------- plano de slides ----------
+# Plano de 16 slides (slide de fechamento removido)
 PLAN = [
     ("inplace", 0, b_cover),
     ("inplace", 1, b_roteiro),
@@ -465,7 +481,6 @@ PLAN = [
     ("inplace", 6, b_criterios),
     ("clone",   3, b_restricao),
     ("clone",   10, b_proximos_passos),
-    ("inplace", 11, b_proxima_decisao),
 ]
 
 ordered_slides = []
@@ -473,6 +488,16 @@ for mode, idx, builder in PLAN:
     sl = TEMPLATE_SLIDES[idx] if mode == "inplace" else clone_slide(TEMPLATE_SLIDES[idx])
     builder(sl)
     ordered_slides.append(sl)
+
+# Lista os 17 slides originais — remove os que não usamos
+used_partnames = {sl.part.partname for sl in ordered_slides}
+sldIdLst = prs.slides._sldIdLst
+for sldId in list(sldIdLst):
+    rId = sldId.attrib[f"{R_NS}id"]
+    part = prs.part.related_part(rId)
+    if part.partname not in used_partnames:
+        sldIdLst.remove(sldId)
+        prs.part.drop_rel(rId)
 
 reorder_slides(prs, ordered_slides)
 
